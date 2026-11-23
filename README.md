@@ -38,7 +38,43 @@ CREATE ROLE monitor LOGIN PASSWORD 'change-me' IN ROLE pg_monitor;
 | Role | primary |
 | Up since | 12 days 03:14:15 |
 | Connected as | monitor @ postgres |
+
+## Cache hit ratio
+
+Overall: **99.87 %** (since the last statistics reset).
+
+| Database | Hit ratio % | Blocks from cache | Blocks from disk |
+|---|---|---|---|
+| appdb | 99.88 | 48211907 | 57230 |
+| postgres | 99.12 | 104233 | 921 |
+
+## Connections
+
+| Used | Available to applications | max_connections | Used % |
+|---|---|---|---|
+| 42 | 197 | 200 | 21.3 |
+
+| State | Connections |
+|---|---|
+| idle | 35 |
+| active | 6 |
+| idle in transaction | 1 |
+
+## Database sizes
+
+| Database | Size |
+|---|---|
+| appdb | 38 GB |
+| postgres | 7532 kB |
 ```
+
+## Checks
+
+| Section | What it shows | Why it matters |
+|---|---|---|
+| Cache hit ratio | share of block reads served from `shared_buffers`, overall and per database | below ~99 % on an OLTP database the working set does not fit in memory |
+| Connections | used vs `max_connections` minus superuser-reserved slots, by state | running out of slots means new logins fail; many `idle in transaction` sessions block `VACUUM` |
+| Database sizes | size of every database | growth trend, disk planning |
 
 ## Exit codes
 
@@ -54,7 +90,7 @@ So it can run from cron, a CI job or a monitoring check (Nagios / Zabbix style).
 ## Roadmap
 
 - [x] skeleton, `--help`, server info header, CI against PostgreSQL 16
-- [ ] cache hit ratio, connections vs `max_connections`, database sizes
+- [x] cache hit ratio, connections vs `max_connections`, database sizes
 - [ ] table bloat estimate, tables that need `VACUUM` / `ANALYZE`
 - [ ] unused and duplicate indexes, with the space they waste
 - [ ] top queries from `pg_stat_statements` (when installed)

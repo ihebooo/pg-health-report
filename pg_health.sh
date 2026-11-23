@@ -78,7 +78,24 @@ IFS='|' read -r version addr port db user uptime in_recovery <<<"$info"
 role="primary"
 [[ $in_recovery == "t" ]] && role="standby (in recovery)"
 
-report() {
+# md_table "Col A|Col B" "$rows" - print psql rows ('|'-separated) as a Markdown table.
+md_table() {
+  local header=$1 rows=$2 sep="|" col line
+  local -a cols
+  if [[ -z $rows ]]; then
+    echo "_None._"
+    return
+  fi
+  IFS='|' read -ra cols <<<"$header"
+  for col in "${cols[@]}"; do sep+="---|"; done
+  echo "| ${header//|/ | } |"
+  echo "$sep"
+  while IFS= read -r line; do
+    echo "| ${line//|/ | } |"
+  done <<<"$rows"
+}
+
+section_overview() {
   cat <<EOF
 # PostgreSQL health report
 
@@ -90,9 +107,65 @@ report() {
 | Role | ${role} |
 | Up since | ${uptime} |
 | Connected as | ${user} @ ${db} |
-
-_Checks are added one by one — see the README for the list._
 EOF
+}
+
+# Share of block reads served from shared_buffers. Below ~99 % on an OLTP
+# database usually means shared_buffers (or RAM) is too small for the working set.
+section_cache_hit() {
+  echo
+  echo "## Cache hit ratio"
+  echo
+  echo "Overall: **$(q "select coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 2)::text || ' %', 'n/a')
+                     from pg_stat_database")** (since the last statistics reset)."
+  echo
+  md_table "Database|Hit ratio %|Blocks from cache|Blocks from disk" "$(q "
+    select datname,
+           coalesce(round(100.0 * blks_hit / nullif(blks_hit + blks_read, 0), 2)::text, 'n/a'),
+           blks_hit, blks_read
+    from pg_stat_database
+    where datname is not null
+    order by blks_hit + blks_read desc")"
+}
+
+# Client connections against what is really available to applications
+# (max_connections minus the slots reserved for superusers).
+section_connections() {
+  echo
+  echo "## Connections"
+  echo
+  md_table "Used|Available to applications|max_connections|Used %" "$(q "
+    with s as (
+      select count(*) filter (where backend_type = 'client backend') as used,
+             current_setting('max_connections')::int as max_conn,
+             current_setting('max_connections')::int
+               - current_setting('superuser_reserved_connections')::int as avail
+      from pg_stat_activity)
+    select used, avail, max_conn, round(100.0 * used / nullif(avail, 0), 1) from s")"
+  echo
+  md_table "State|Connections" "$(q "
+    select coalesce(state, 'unknown'), count(*)
+    from pg_stat_activity
+    where backend_type = 'client backend'
+    group by 1 order by 2 desc")"
+}
+
+section_db_sizes() {
+  echo
+  echo "## Database sizes"
+  echo
+  md_table "Database|Size" "$(q "
+    select datname, pg_size_pretty(pg_database_size(datname))
+    from pg_database
+    where datallowconn
+    order by pg_database_size(datname) desc")"
+}
+
+report() {
+  section_overview
+  section_cache_hit
+  section_connections
+  section_db_sizes
 }
 
 if [[ -n $output ]]; then

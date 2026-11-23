@@ -51,6 +51,15 @@ jobs:
           grep -q '^# PostgreSQL health report' report.md
           grep -q '| Server | PostgreSQL 16' report.md
           grep -q '| Role | primary |' report.md
+      - name: Cache hit ratio, connections and database sizes are reported
+        run: |
+          ./pg_health.sh > report.md
+          grep -q '^## Cache hit ratio' report.md
+          grep -Eq '^Overall: \*\*[0-9.]+ %\*\*' report.md
+          grep -q '^## Connections' report.md
+          grep -Eq '^\| [0-9]+ \| 97 \| 100 \| [0-9.]+ \|$' report.md   # default 100 - 3 reserved
+          grep -q '^## Database sizes' report.md
+          grep -Eq '^\| postgres \| [0-9]+ [kMG]?B \|$' report.md
       - name: Same report with a monitoring role (pg_monitor, no superuser)
         run: |
           psql -qAtc "create role monitor login password 'monitor' in role pg_monitor"
