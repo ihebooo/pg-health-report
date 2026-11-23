@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pg_health.sh - one-script PostgreSQL health report (Markdown).
+# pg_health.sh - one-script PostgreSQL health report (Markdown or HTML).
 #
 # Read-only: it only runs SELECT queries. A role with pg_monitor is enough.
 # See --help for usage and exit codes.
@@ -12,10 +12,14 @@ usage() {
   cat <<EOF
 Usage: $PROG [options] [psql connection options...]
 
-Print a health report of a PostgreSQL server in Markdown.
+Print a health report of a PostgreSQL server in Markdown or HTML.
 
 Options:
   -o, --output FILE   write the report to FILE instead of stdout
+                      (a FILE ending in .html selects --format html)
+  -f, --format FMT    md (default) or html: one self-contained page
+      --to-html FILE  convert a saved Markdown report to HTML and exit
+                      (no database connection)
   -h, --help          show this help and exit
   -V, --version       show the version and exit
 
@@ -37,7 +41,111 @@ EOF
 
 die() { echo "$PROG: $*" >&2; exit 3; }
 
+# md_to_html - turn the report's Markdown (stdin) into one self-contained HTML
+# page (stdout). Handles only what this script writes: headings, tables,
+# paragraphs, **bold**, `code` and _notes_. Plain POSIX awk, no dependency.
+md_to_html() {
+  awk '
+    # replace without gsub: "&" in a gsub replacement means "the match", and
+    # escaping it differs between awk implementations
+    function rep(t, a, b,   n, p, i, o) { n = split(t, p, a); o = p[1]; for (i = 2; i <= n; i++) o = o b p[i]; return o }
+    function esc(t) { return rep(rep(rep(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;") }
+    function bold(t,   o, i, j, r) {
+      o = ""
+      while ((i = index(t, "**")) > 0) {
+        r = substr(t, i + 2); j = index(r, "**"); if (!j) break
+        o = o substr(t, 1, i - 1) "<strong>" substr(r, 1, j - 1) "</strong>"; t = substr(r, j + 2)
+      }
+      return o t
+    }
+    function inline(t,   o, i, j, r) {
+      t = esc(t); o = ""
+      while ((i = index(t, "`")) > 0) {
+        r = substr(t, i + 1); j = index(r, "`"); if (!j) break
+        o = o bold(substr(t, 1, i - 1)) "<code>" substr(r, 1, j - 1) "</code>"; t = substr(r, j + 1)
+      }
+      t = o bold(t)
+      gsub(/<strong>Status: OK<\/strong>/, "<span class=\"st OK\">OK</span>", t)
+      gsub(/<strong>Status: WARN<\/strong>/, "<span class=\"st WARN\">WARN</span>", t)
+      gsub(/<strong>Status: CRIT<\/strong>/, "<span class=\"st CRIT\">CRIT</span>", t)
+      gsub(/Overall: <strong>OK<\/strong>/, "Overall: <span class=\"st OK\">OK</span>", t)
+      gsub(/Overall: <strong>WARN<\/strong>/, "Overall: <span class=\"st WARN\">WARN</span>", t)
+      gsub(/Overall: <strong>CRIT<\/strong>/, "Overall: <span class=\"st CRIT\">CRIT</span>", t)
+      return t
+    }
+    function cell(t, tag) {
+      gsub(/^ +| +$/, "", t)
+      if (t == "OK" || t == "WARN" || t == "CRIT") return "<" tag "><span class=\"st " t "\">" t "</span></" tag ">"
+      return "<" tag ">" inline(t) "</" tag ">"
+    }
+    function flush_para(   t) {
+      if (para == "") return
+      t = para; para = ""
+      if (t ~ /^_.*_$/) { print "<p class=\"note\">" inline(substr(t, 2, length(t) - 2)) "</p>"; return }
+      print "<p>" inline(t) "</p>"
+    }
+    function close_table() { if (intable) { print "</tbody></table></div>"; intable = 0 } }
+    BEGIN { para = ""; intable = 0; body = ""; title = "PostgreSQL health report" }
+    /^\|/ {
+      flush_para()
+      if ($0 ~ /^\|(---\|)+$/) next
+      line = $0; sub(/^\| ?/, "", line); sub(/ ?\|$/, "", line)
+      n = split(line, c, "|")
+      if (!intable) { printf "<div class=\"tw\"><table><thead><tr>"; for (k = 1; k <= n; k++) printf "%s", cell(c[k], "th"); print "</tr></thead><tbody>"; intable = 1; next }
+      printf "<tr>"; for (k = 1; k <= n; k++) printf "%s", cell(c[k], "td"); print "</tr>"
+      next
+    }
+    { close_table() }
+    /^### / { flush_para(); print "<h3>" inline(substr($0, 5)) "</h3>"; next }
+    /^## /  { flush_para(); print "<h2>" inline(substr($0, 4)) "</h2>"; next }
+    /^# /   { flush_para(); print "<h1>" inline(substr($0, 3)) "</h1>"; next }
+    /^[[:space:]]*$/ { flush_para(); next }
+    { para = (para == "" ? $0 : para " " $0) }
+    END { flush_para(); close_table() }
+  ' | {
+    cat <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL health report</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --head: #f6f8fa;
+          --ok: #1a7f37; --warn: #9a6700; --crit: #cf222e; --code: #eff1f3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --head: #151b23;
+            --ok: #3fb950; --warn: #d29922; --crit: #f85149; --code: #262c36; }
+  }
+  body { margin: 0 auto; max-width: 1100px; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  h1 { font-size: 26px; margin: 0 0 16px; }
+  h2 { font-size: 20px; margin: 36px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 20px 0 8px; }
+  .tw { overflow-x: auto; margin: 8px 0; }
+  table { border-collapse: collapse; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--head); }
+  td { font-variant-numeric: tabular-nums; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px;
+         font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  p.note { color: var(--muted); font-size: 13px; }
+  .st { display: inline-block; min-width: 44px; text-align: center; padding: 1px 8px; border-radius: 10px;
+        color: #fff; font-weight: 600; font-size: 12px; }
+  .st.OK { background: var(--ok); } .st.WARN { background: var(--warn); } .st.CRIT { background: var(--crit); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+HTML
+    cat
+    printf '<footer>Generated by pg_health.sh %s — https://github.com/ihebooo/pg-health-report</footer>\n' "$VERSION"
+    printf '</body>\n</html>\n'
+  }
+}
+
 output=""
+format=""
 psql_args=()
 while (($#)); do
   case $1 in
@@ -46,11 +154,26 @@ while (($#)); do
       output=$2
       shift 2
       ;;
+    -f|--format)
+      [[ $# -ge 2 && ( $2 == md || $2 == html ) ]] || die "$1 needs md or html (see --help)"
+      format=$2
+      shift 2
+      ;;
+    --to-html)
+      [[ $# -ge 2 && -r $2 ]] || die "$1 needs a readable Markdown report"
+      md_to_html <"$2"
+      exit 0
+      ;;
     --help)    usage; exit 0 ;;
     -V|--version) echo "$PROG $VERSION"; exit 0 ;;
     *)         psql_args+=("$1"); shift ;;
   esac
 done
+
+if [[ -z $format ]]; then
+  format=md
+  [[ $output == *.html ]] && format=html
+fi
 
 # -h alone means help, as in most tools; "-h HOST" is passed to psql.
 if [[ ${#psql_args[@]} -eq 1 && ${psql_args[0]} == "-h" ]]; then
@@ -464,8 +587,8 @@ section_replication() {
     from pg_replication_slots
     order by active, pg_wal_lsn_diff(${lsn}, restart_lsn) desc nulls last"
   echo
-  echo "_An inactive slot keeps every WAL file since its restart point until the disk fills up._"
-  echo "_Drop it when its consumer is gone: \`SELECT pg_drop_replication_slot('<slot>');\`._"
+  echo "_An inactive slot keeps every WAL file since its restart point until the disk fills up."
+  echo "Drop it when its consumer is gone: \`SELECT pg_drop_replication_slot('<slot>');\`._"
 
   local broken lag_bytes inactive retained
   if [[ $in_recovery == "t" ]]; then
@@ -542,8 +665,8 @@ section_summary() {
 
 # Sections run first (their statuses feed the summary), then the overview and
 # the summary are printed above them.
-body=""
-trap 'if [[ -n $body ]]; then rm -f "$body"; fi' EXIT
+body="" md=""
+trap 'rm -f ${body:+"$body"} ${md:+"$md"}' EXIT
 
 report() {
   body=$(mktemp)
@@ -564,10 +687,22 @@ report() {
   cat "$body"
 }
 
+render() {
+  if [[ $format == html ]]; then
+    # not "report | md_to_html": the pipe would run report in a subshell and
+    # lose the statuses that make the exit code
+    md=$(mktemp)
+    report >"$md"
+    md_to_html <"$md"
+  else
+    report
+  fi
+}
+
 if [[ -n $output ]]; then
-  report >"$output"
+  render >"$output"
   echo "report written to $output" >&2
 else
-  report
+  render
 fi
 exit "$worst"

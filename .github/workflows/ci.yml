@@ -145,6 +145,32 @@ jobs:
           grep -Eq '^\| old_standby \| physical \| no \| [0-9]+ (bytes|kB|MB) \|$' report.md
           grep -q '^## Transaction ID wraparound' report.md
           grep -Eq '^\| postgres \| [0-9]+ \| [0-9.]+ \| 200000000 \|$' report.md
+      - name: HTML report keeps the same statuses and exit code
+        run: |
+          set +e
+          ./pg_health.sh > report.md; rc_md=$?
+          ./pg_health.sh -o report.html; rc_html=$?
+          ./pg_health.sh --format html > report2.html; rc_fmt=$?
+          set -e
+          echo "exit codes: md=$rc_md html=$rc_html format=$rc_fmt"
+          [ "$rc_md" -eq 1 ] && [ "$rc_html" -eq 1 ] && [ "$rc_fmt" -eq 1 ]
+          head -c 15 report.html | grep -qi '<!doctype html>'
+          grep -q '<h2>Summary</h2>' report.html
+          grep -q '<td><span class="st WARN">WARN</span></td>' report.html
+          grep -q '<th>Table</th><th>Size</th><th>Estimated bloat</th><th>Bloat %</th>' report.html
+          grep -q '</html>' report.html
+          # no raw Markdown left in the page
+          if grep -Eq '^\||\*\*|^#' report.html; then echo "unconverted Markdown"; exit 1; fi
+          # a saved Markdown report converts the same way, without a database
+          PGHOST=/nonexistent ./pg_health.sh --to-html report.md > converted.html
+          grep -q '<td><span class="st WARN">WARN</span></td>' converted.html
+      - name: Keep the reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-reports
+          path: |
+            report.md
+            report.html
       - name: Same report with a monitoring role (pg_monitor, no superuser)
         run: |
           psql -qAtc "create role monitor login password 'monitor' in role pg_monitor"

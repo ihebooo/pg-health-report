@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL health report</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --head: #f6f8fa;
+          --ok: #1a7f37; --warn: #9a6700; --crit: #cf222e; --code: #eff1f3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --head: #151b23;
+            --ok: #3fb950; --warn: #d29922; --crit: #f85149; --code: #262c36; }
+  }
+  body { margin: 0 auto; max-width: 1100px; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  h1 { font-size: 26px; margin: 0 0 16px; }
+  h2 { font-size: 20px; margin: 36px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 20px 0 8px; }
+  .tw { overflow-x: auto; margin: 8px 0; }
+  table { border-collapse: collapse; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--head); }
+  td { font-variant-numeric: tabular-nums; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px;
+         font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  p.note { color: var(--muted); font-size: 13px; }
+  .st { display: inline-block; min-width: 44px; text-align: center; padding: 1px 8px; border-radius: 10px;
+        color: #fff; font-weight: 600; font-size: 12px; }
+  .st.OK { background: var(--ok); } .st.WARN { background: var(--warn); } .st.CRIT { background: var(--crit); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>PostgreSQL health report</h1>
+<div class="tw"><table><thead><tr><th></th><th></th></tr></thead><tbody>
+<tr><td>Generated</td><td>2026-11-23 08:00:00 UTC</td></tr>
+<tr><td>Server</td><td>PostgreSQL 16.6 (Debian 16.6-1.pgdg120+1)</td></tr>
+<tr><td>Address</td><td>192.0.2.10:5432</td></tr>
+<tr><td>Role</td><td>primary</td></tr>
+<tr><td>Up since</td><td>12 days 03:14:15</td></tr>
+<tr><td>Connected as</td><td>monitor @ appdb</td></tr>
+</tbody></table></div>
+<h2>Summary</h2>
+<p>Overall: <span class="st CRIT">CRIT</span></p>
+<div class="tw"><table><thead><tr><th>Check</th><th>Status</th><th>What to do</th></tr></thead><tbody>
+<tr><td>Replication</td><td><span class="st CRIT">CRIT</span></td><td>an inactive slot retains more than 1 GB of WAL — drop it or bring its consumer back before the disk fills</td></tr>
+<tr><td>Table bloat</td><td><span class="st WARN">WARN</span></td><td>up to 38.7 % bloat (most space wasted: public.order_lines) — pg_repack, or VACUUM FULL in a maintenance window</td></tr>
+<tr><td>VACUUM / ANALYZE</td><td><span class="st WARN">WARN</span></td><td>1 table(s) past the autovacuum trigger, first public.job_queue — vacuum it and find out why autovacuum did not</td></tr>
+<tr><td>Unused indexes</td><td><span class="st WARN">WARN</span></td><td>2 index(es) never scanned, largest public.order_lines_created_idx — confirm over a full business cycle, then drop</td></tr>
+<tr><td>Duplicate indexes</td><td><span class="st WARN">WARN</span></td><td>1 set(s) of identical indexes, first on table customers — keep one, drop the copies</td></tr>
+<tr><td>Cache hit ratio</td><td><span class="st OK">OK</span></td><td>99.87 %</td></tr>
+<tr><td>Connections</td><td><span class="st OK">OK</span></td><td>21.3 % of the slots used</td></tr>
+<tr><td>XID wraparound</td><td><span class="st OK">OK</span></td><td>oldest database at 9.6 %</td></tr>
+</tbody></table></div>
+<h2>Cache hit ratio</h2>
+<p>Overall: <strong>99.87 %</strong> (since the last statistics reset).</p>
+<div class="tw"><table><thead><tr><th>Database</th><th>Hit ratio %</th><th>Blocks from cache</th><th>Blocks from disk</th></tr></thead><tbody>
+<tr><td>appdb</td><td>99.88</td><td>48211907</td><td>57230</td></tr>
+<tr><td>postgres</td><td>99.12</td><td>104233</td><td>921</td></tr>
+</tbody></table></div>
+<p><span class="st OK">OK</span> — 99.87 %</p>
+<h2>Connections</h2>
+<div class="tw"><table><thead><tr><th>Used</th><th>Available to applications</th><th>max_connections</th><th>Used %</th></tr></thead><tbody>
+<tr><td>42</td><td>197</td><td>200</td><td>21.3</td></tr>
+</tbody></table></div>
+<div class="tw"><table><thead><tr><th>State</th><th>Connections</th></tr></thead><tbody>
+<tr><td>idle</td><td>35</td></tr>
+<tr><td>active</td><td>6</td></tr>
+<tr><td>idle in transaction</td><td>1</td></tr>
+</tbody></table></div>
+<p><span class="st OK">OK</span> — 21.3 % of the slots used</p>
+<h2>Database sizes</h2>
+<div class="tw"><table><thead><tr><th>Database</th><th>Size</th></tr></thead><tbody>
+<tr><td>appdb</td><td>38 GB</td></tr>
+<tr><td>postgres</td><td>7532 kB</td></tr>
+</tbody></table></div>
+<h2>Table bloat (estimate, database appdb)</h2>
+<div class="tw"><table><thead><tr><th>Table</th><th>Size</th><th>Estimated bloat</th><th>Bloat %</th></tr></thead><tbody>
+<tr><td>public.order_lines</td><td>4210 MB</td><td>1630 MB</td><td>38.7</td></tr>
+<tr><td>public.audit_log</td><td>950 MB</td><td>212 MB</td><td>22.3</td></tr>
+</tbody></table></div>
+<p class="note">Tables of at least 1 MB with 20 % or more estimated bloat. Tables whose columns the role cannot read are not visible in pg_stats and are skipped (grant pg_read_all_data on PostgreSQL 14+ to include them). Reclaim space with pg_repack or VACUUM FULL (locks the table).</p>
+<p><span class="st WARN">WARN</span> — up to 38.7 % bloat (most space wasted: public.order_lines) — pg_repack, or VACUUM FULL in a maintenance window</p>
+<h2>Tables that need VACUUM / ANALYZE (database appdb)</h2>
+<div class="tw"><table><thead><tr><th>Table</th><th>Needs</th><th>Live rows</th><th>Dead rows</th><th>Dead %</th><th>Changed since analyze</th><th>Last vacuum</th><th>Last analyze</th></tr></thead><tbody>
+<tr><td>public.job_queue</td><td>VACUUM + ANALYZE</td><td>120344</td><td>981220</td><td>89.1</td><td>1402311</td><td>2026-11-02 03:11</td><td>2026-11-02 03:11</td></tr>
+</tbody></table></div>
+<p class="note">Run <code>VACUUM (ANALYZE, VERBOSE) &lt;table&gt;;</code> and check why autovacuum did not: long transactions, <code>autovacuum_enabled = off</code>, or too few autovacuum workers.</p>
+<p><span class="st WARN">WARN</span> — 1 table(s) past the autovacuum trigger, first public.job_queue — vacuum it and find out why autovacuum did not</p>
+<h2>Unused indexes (database appdb)</h2>
+<div class="tw"><table><thead><tr><th>Index</th><th>Table</th><th>Size</th><th>Index scans</th></tr></thead><tbody>
+<tr><td>public.order_lines_created_idx</td><td>order_lines</td><td>512 MB</td><td>0</td></tr>
+<tr><td>public.customers_legacy_code_idx</td><td>customers</td><td>18 MB</td><td>0</td></tr>
+</tbody></table></div>
+<p class="note">Counted since 2026-10-01 00:00. Make sure that covers a full business cycle (month-end jobs, reports) and check standbys too: index usage is counted per server. Then <code>DROP INDEX CONCURRENTLY &lt;index&gt;;</code>.</p>
+<p><span class="st WARN">WARN</span> — 2 index(es) never scanned, largest public.order_lines_created_idx — confirm over a full business cycle, then drop</p>
+<h2>Duplicate indexes (database appdb)</h2>
+<div class="tw"><table><thead><tr><th>Table</th><th>Identical indexes</th><th>Wasted space</th></tr></thead><tbody>
+<tr><td>customers</td><td>customers_email_idx, customers_email_idx1</td><td>41 MB</td></tr>
+</tbody></table></div>
+<p class="note">Keep the one that backs a constraint (primary key / unique), drop the others with <code>DROP INDEX CONCURRENTLY</code>.</p>
+<p><span class="st WARN">WARN</span> — 1 set(s) of identical indexes, first on table customers — keep one, drop the copies</p>
+<h2>Top queries by total time (database appdb)</h2>
+<div class="tw"><table><thead><tr><th>Calls</th><th>Total time</th><th>Mean ms</th><th>% of total</th><th>Rows</th><th>Query</th></tr></thead><tbody>
+<tr><td>1840211</td><td>96.4 min</td><td>3.14</td><td>41.2</td><td>1840211</td><td>select * from order_lines where order_id = $1</td></tr>
+<tr><td>2210</td><td>51.0 min</td><td>1384.62</td><td>21.8</td><td>2210</td><td>select customer_id, sum(amount) from invoices where created_at &gt;= $1 group by 1</td></tr>
+<tr><td>98112</td><td>18.7 min</td><td>11.44</td><td>8.0</td><td>98112</td><td>update job_queue set status = $1, updated_at = now() where id = $2</td></tr>
+</tbody></table></div>
+<p class="note">Start with the top lines: <code>EXPLAIN (ANALYZE, BUFFERS)</code> the query, look for missing indexes or row-by-row loops. Reset the counters with <code>SELECT pg_stat_statements_reset();</code>.</p>
+<h2>Replication</h2>
+<div class="tw"><table><thead><tr><th>Standby</th><th>Address</th><th>State</th><th>Sync</th><th>Replay lag</th><th>Lag (time)</th></tr></thead><tbody>
+<tr><td>standby1</td><td>192.0.2.11</td><td>streaming</td><td>async</td><td>0 bytes</td><td>00:00:00</td></tr>
+</tbody></table></div>
+<h3>Replication slots</h3>
+<div class="tw"><table><thead><tr><th>Slot</th><th>Type</th><th>Active</th><th>WAL retained</th></tr></thead><tbody>
+<tr><td>old_reporting</td><td>logical</td><td>no</td><td>14 GB</td></tr>
+<tr><td>standby1</td><td>physical</td><td>yes</td><td>120 kB</td></tr>
+</tbody></table></div>
+<p class="note">An inactive slot keeps every WAL file since its restart point until the disk fills up. Drop it when its consumer is gone: <code>SELECT pg_drop_replication_slot('&lt;slot&gt;');</code>.</p>
+<p><span class="st CRIT">CRIT</span> — an inactive slot retains more than 1 GB of WAL — drop it or bring its consumer back before the disk fills</p>
+<h2>Transaction ID wraparound</h2>
+<div class="tw"><table><thead><tr><th>Database</th><th>XID age</th><th>% of wraparound</th><th>autovacuum_freeze_max_age</th></tr></thead><tbody>
+<tr><td>appdb</td><td>206118343</td><td>9.6</td><td>200000000</td></tr>
+<tr><td>postgres</td><td>104871</td><td>0.0</td><td>200000000</td></tr>
+</tbody></table></div>
+<p class="note">Above autovacuum_freeze_max_age autovacuum runs an aggressive freeze. If the age keeps growing, look for long transactions, abandoned prepared transactions or inactive slots, then <code>VACUUM (FREEZE, VERBOSE)</code> the oldest tables.</p>
+<p><span class="st OK">OK</span> — oldest database at 9.6 %</p>
+<footer>Generated by pg_health.sh 0.1.0-dev — https://github.com/ihebooo/pg-health-report</footer>
+</body>
+</html>
