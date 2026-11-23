@@ -5,7 +5,7 @@
 # See --help for usage and exit codes.
 set -euo pipefail
 
-readonly VERSION="0.1.0-dev"
+readonly VERSION="0.1.0"
 readonly PROG=${0##*/}
 
 usage() {
