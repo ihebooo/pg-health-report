@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck pg_health.sh
+
+  report:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: --help and --version exit 0
+        run: |
+          ./pg_health.sh --help | grep -q '^Usage:'
+          ./pg_health.sh -h | grep -q '^Usage:'
+          ./pg_health.sh --version | grep -q '^pg_health.sh '
+      - name: -o without a file is a usage error (exit 3)
+        run: |
+          set +e
+          ./pg_health.sh -o; rc=$?
+          echo "exit code: $rc"
+          [ "$rc" -eq 3 ]
+      - name: Report against PostgreSQL 16
+        run: |
+          ./pg_health.sh | tee report.md
+          grep -q '^# PostgreSQL health report' report.md
+          grep -q '| Server | PostgreSQL 16' report.md
+          grep -q '| Role | primary |' report.md
+      - name: Same report with a monitoring role (pg_monitor, no superuser)
+        run: |
+          psql -qAtc "create role monitor login password 'monitor' in role pg_monitor"
+          PGUSER=monitor PGPASSWORD=monitor ./pg_health.sh -o report.md
+          grep -q '| Connected as | monitor @ postgres |' report.md
+      - name: Unreachable server gives exit 3
+        run: |
+          set +e
+          ./pg_health.sh -p 5999; rc=$?
+          echo "exit code: $rc"
+          [ "$rc" -eq 3 ]
