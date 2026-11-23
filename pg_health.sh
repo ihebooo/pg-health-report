@@ -84,6 +84,7 @@ md_table() {
   local header=$1 rows sep="|" line
   local -a cols
   rows=$(q "$2") || die "query failed (see the psql error above)"
+  table_rows=$rows   # kept for the status of the calling section
   if [[ -z $rows ]]; then
     echo "_None._"
     return
@@ -96,6 +97,38 @@ md_table() {
     echo "| ${line//|/ | } |"
   done <<<"$rows"
 }
+
+# --- status of each check -----------------------------------------------------
+worst=0          # 0 OK, 1 WARN, 2 CRIT -> exit code
+summary=()       # "check|STATUS|what to do"
+table_rows=""
+
+# status LEVEL CHECK HINT - print the status line of a section and remember it.
+status() {
+  local level=$1 check=$2 hint=$3 n=0
+  case $level in
+    WARN) n=1 ;;
+    CRIT) n=2 ;;
+  esac
+  (( n > worst )) && worst=$n
+  summary+=("${check}|${level}|${hint}")
+  echo
+  echo "**Status: ${level}** — ${hint}"
+}
+
+# ge A B - true when number A >= number B (decimals allowed).
+ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
+
+# max_field N - largest value of field N (1-based) in the last table's rows.
+max_field() {
+  [[ -n $table_rows ]] || { echo 0; return; }
+  awk -F'|' -v f="$1" 'BEGIN { m = 0; s = "0" } $f + 0 > m { m = $f + 0; s = $f } END { print s }' <<<"$table_rows"
+}
+
+# first_field - first column of the first row of the last table.
+first_field() { local l=${table_rows%%$'\n'*}; echo "${l%%|*}"; }
+
+row_count() { [[ -n $table_rows ]] && wc -l <<<"$table_rows" || echo 0; }
 
 section_overview() {
   cat <<EOF
@@ -130,6 +163,19 @@ section_cache_hit() {
     from pg_stat_database
     where datname is not null
     order by blks_hit + blks_read desc"
+  local blocks ratio
+  IFS='|' read -r blocks ratio <<<"$(q "select coalesce(sum(blks_hit + blks_read), 0),
+                                              coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 2), 100)
+                                       from pg_stat_database")"
+  if ! ge "$blocks" 100000; then
+    status OK "Cache hit ratio" "not enough reads since the statistics reset to judge yet"
+  elif ! ge "$ratio" 90; then
+    status CRIT "Cache hit ratio" "${ratio} %: most reads go to disk — raise shared_buffers or add RAM, look for full scans (top queries)"
+  elif ! ge "$ratio" 99; then
+    status WARN "Cache hit ratio" "${ratio} %: the working set does not fit in memory — check shared_buffers and the top queries"
+  else
+    status OK "Cache hit ratio" "${ratio} %"
+  fi
 }
 
 # Client connections against what is really available to applications
@@ -146,12 +192,28 @@ section_connections() {
                - current_setting('superuser_reserved_connections')::int as avail
       from pg_stat_activity)
     select used, avail, max_conn, round(100.0 * used / nullif(avail, 0), 1) from s"
+  local pct
+  pct=$(awk -F'|' '{ print $4 + 0 }' <<<"$table_rows")
   echo
   md_table "State|Connections" "
     select coalesce(state, 'unknown'), count(*)
     from pg_stat_activity
     where backend_type = 'client backend'
     group by 1 order by 2 desc"
+  local idle_tx
+  idle_tx=$(q "select count(*) from pg_stat_activity
+               where state like 'idle in transaction%'
+                 and now() - state_change > interval '5 minutes'") \
+    || die "query failed (see the psql error above)"
+  if ge "$pct" 90; then
+    status CRIT "Connections" "${pct} % of the slots used: new logins will soon fail — find who holds them, use a pooler (PgBouncer)"
+  elif ge "$pct" 75; then
+    status WARN "Connections" "${pct} % of the slots used — check for connection leaks before raising max_connections"
+  elif (( idle_tx > 0 )); then
+    status WARN "Connections" "${idle_tx} session(s) idle in transaction for more than 5 minutes: they hold locks and block VACUUM"
+  else
+    status OK "Connections" "${pct} % of the slots used"
+  fi
 }
 
 section_db_sizes() {
@@ -204,6 +266,15 @@ section_bloat() {
   echo "_Tables of at least 1 MB with 20 % or more estimated bloat. Tables whose columns the"
   echo "role cannot read are not visible in pg_stats and are skipped (grant pg_read_all_data on"
   echo "PostgreSQL 14+ to include them). Reclaim space with pg_repack or VACUUM FULL (locks the table)._"
+  local top
+  top=$(max_field 4)
+  if ge "$top" 50; then
+    status WARN "Table bloat" "up to ${top} % bloat (most space wasted: $(first_field)) — pg_repack, or VACUUM FULL in a maintenance window"
+  elif [[ -n $table_rows ]]; then
+    status OK "Table bloat" "some bloat (up to ${top} %), nothing urgent"
+  else
+    status OK "Table bloat" "no table with significant bloat"
+  fi
 }
 
 # Tables past their autovacuum / autoanalyze trigger point (global settings):
@@ -240,6 +311,11 @@ section_vacuum() {
   echo
   echo "_Run \`VACUUM (ANALYZE, VERBOSE) <table>;\` and check why autovacuum did not:"
   echo "long transactions, \`autovacuum_enabled = off\`, or too few autovacuum workers._"
+  if [[ -n $table_rows ]]; then
+    status WARN "VACUUM / ANALYZE" "$(row_count) table(s) past the autovacuum trigger, first $(first_field) — vacuum it and find out why autovacuum did not"
+  else
+    status OK "VACUUM / ANALYZE" "autovacuum keeps up"
+  fi
 }
 
 # Indexes never used since the statistics were reset. Unique and primary-key
@@ -261,6 +337,7 @@ section_unused_indexes() {
       and not exists (select 1 from pg_constraint c where c.conindid = s.indexrelid)
     order by pg_relation_size(s.indexrelid) desc
     limit 20"
+  local unused=$table_rows
   echo
   local since
   since=$(q "select coalesce(to_char(stats_reset, 'YYYY-MM-DD HH24:MI'), 'server start')
@@ -269,6 +346,12 @@ section_unused_indexes() {
   echo "_Counted since ${since}. Make sure that covers a full business cycle (month-end jobs,"
   echo "reports) and check standbys too: index usage is counted per server. Then"
   echo "\`DROP INDEX CONCURRENTLY <index>;\`._"
+  table_rows=$unused
+  if [[ -n $table_rows ]]; then
+    status WARN "Unused indexes" "$(row_count) index(es) never scanned, largest $(first_field) — confirm over a full business cycle, then drop"
+  else
+    status OK "Unused indexes" "every index has been used"
+  fi
 }
 
 # Indexes with the same table, columns, operator classes, expressions and
@@ -298,6 +381,11 @@ section_duplicate_indexes() {
   echo
   echo "_Keep the one that backs a constraint (primary key / unique), drop the others with"
   echo "\`DROP INDEX CONCURRENTLY\`._"
+  if [[ -n $table_rows ]]; then
+    status WARN "Duplicate indexes" "$(row_count) set(s) of identical indexes, first on table $(first_field) — keep one, drop the copies"
+  else
+    status OK "Duplicate indexes" "no duplicates"
+  fi
 }
 
 # Most expensive statements from pg_stat_statements, when it is installed in
@@ -378,6 +466,32 @@ section_replication() {
   echo
   echo "_An inactive slot keeps every WAL file since its restart point until the disk fills up._"
   echo "_Drop it when its consumer is gone: \`SELECT pg_drop_replication_slot('<slot>');\`._"
+
+  local broken lag_bytes inactive retained
+  if [[ $in_recovery == "t" ]]; then
+    broken=$(q "select count(*) = 0 or bool_or(status <> 'streaming') from pg_stat_wal_receiver")
+    lag_bytes=0
+  else
+    IFS='|' read -r broken lag_bytes <<<"$(q "select coalesce(bool_or(state <> 'streaming'), false),
+             coalesce(max(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)), 0)::bigint
+      from pg_stat_replication")"
+  fi
+  IFS='|' read -r inactive retained <<<"$(q "select count(*) filter (where not active),
+         coalesce(max(pg_wal_lsn_diff(${lsn}, restart_lsn)) filter (where not active), 0)::bigint
+    from pg_replication_slots")"
+  if [[ $broken == "t" ]]; then
+    status CRIT "Replication" "a standby is not streaming — check both server logs, network and pg_hba"
+  elif ge "$retained" 1073741824; then
+    status CRIT "Replication" "an inactive slot retains more than 1 GB of WAL — drop it or bring its consumer back before the disk fills"
+  elif ge "$lag_bytes" 1073741824; then
+    status CRIT "Replication" "a standby is more than 1 GB behind — check its disk I/O and network"
+  elif (( inactive > 0 )); then
+    status WARN "Replication" "${inactive} inactive replication slot(s) holding WAL — drop them if their consumer is gone"
+  elif ge "$lag_bytes" 104857600; then
+    status WARN "Replication" "a standby is more than 100 MB behind"
+  else
+    status OK "Replication" "no lag problem, no inactive slot"
+  fi
 }
 
 # Transaction ID age per database. At 2^31 PostgreSQL stops accepting writes to
@@ -396,20 +510,57 @@ section_wraparound() {
   echo "_Above autovacuum_freeze_max_age autovacuum runs an aggressive freeze. If the age keeps"
   echo "growing, look for long transactions, abandoned prepared transactions or inactive slots,"
   echo "then \`VACUUM (FREEZE, VERBOSE)\` the oldest tables._"
+  local pct
+  pct=$(max_field 3)
+  if ge "$pct" 70; then
+    status CRIT "XID wraparound" "$(first_field) is at ${pct} % of wraparound — VACUUM (FREEZE) it now, remove what blocks autovacuum"
+  elif ge "$pct" 40; then
+    status WARN "XID wraparound" "$(first_field) is at ${pct} % of wraparound — check that autovacuum can freeze it"
+  else
+    status OK "XID wraparound" "oldest database at ${pct} %"
+  fi
 }
 
+# Summary of every check with a status, worst first.
+section_summary() {
+  local names=(OK WARN CRIT) line level
+  echo
+  echo "## Summary"
+  echo
+  echo "Overall: **${names[$worst]}**"
+  echo
+  echo "| Check | Status | What to do |"
+  echo "|---|---|---|"
+  for level in CRIT WARN OK; do
+    for line in "${summary[@]}"; do
+      IFS='|' read -r check st hint <<<"$line"
+      [[ $st == "$level" ]] && echo "| ${check} | ${st} | ${hint} |"
+    done
+  done
+  return 0
+}
+
+# Sections run first (their statuses feed the summary), then the overview and
+# the summary are printed above them.
 report() {
+  local body
+  body=$(mktemp)
+  trap 'rm -f "$body"' EXIT
+  {
+    section_cache_hit
+    section_connections
+    section_db_sizes
+    section_bloat
+    section_vacuum
+    section_unused_indexes
+    section_duplicate_indexes
+    section_top_queries
+    section_replication
+    section_wraparound
+  } >"$body"
   section_overview
-  section_cache_hit
-  section_connections
-  section_db_sizes
-  section_bloat
-  section_vacuum
-  section_unused_indexes
-  section_duplicate_indexes
-  section_top_queries
-  section_replication
-  section_wraparound
+  section_summary
+  cat "$body"
 }
 
 if [[ -n $output ]]; then
@@ -418,4 +569,4 @@ if [[ -n $output ]]; then
 else
   report
 fi
-exit 0
+exit "$worst"
