@@ -242,6 +242,64 @@ section_vacuum() {
   echo "long transactions, \`autovacuum_enabled = off\`, or too few autovacuum workers._"
 }
 
+# Indexes never used since the statistics were reset. Unique and primary-key
+# indexes are skipped: they enforce constraints even when no query reads them.
+section_unused_indexes() {
+  echo
+  echo "## Unused indexes (database ${db})"
+  echo
+  md_table "Index|Table|Size|Index scans" "
+    select s.schemaname || '.' || s.indexrelname,
+           s.relname,
+           pg_size_pretty(pg_relation_size(s.indexrelid)),
+           s.idx_scan
+    from pg_stat_user_indexes s
+    join pg_index i on i.indexrelid = s.indexrelid
+    where s.idx_scan = 0
+      and not i.indisunique
+      and not i.indisprimary
+      and not exists (select 1 from pg_constraint c where c.conindid = s.indexrelid)
+    order by pg_relation_size(s.indexrelid) desc
+    limit 20"
+  echo
+  local since
+  since=$(q "select coalesce(to_char(stats_reset, 'YYYY-MM-DD HH24:MI'), 'server start')
+             from pg_stat_database where datname = current_database()") \
+    || die "query failed (see the psql error above)"
+  echo "_Counted since ${since}. Make sure that covers a full business cycle (month-end jobs,"
+  echo "reports) and check standbys too: index usage is counted per server. Then"
+  echo "\`DROP INDEX CONCURRENTLY <index>;\`._"
+}
+
+# Indexes with the same table, columns, operator classes, expressions and
+# predicate: every copy but one only costs disk and slows down writes.
+section_duplicate_indexes() {
+  echo
+  echo "## Duplicate indexes (database ${db})"
+  echo
+  md_table "Table|Identical indexes|Wasted space" "
+    with i as (
+      select x.indrelid, x.indexrelid,
+             x.indkey::text || ' ' || x.indclass::text || ' ' || x.indcollation::text || ' '
+               || coalesce(pg_get_expr(x.indexprs, x.indrelid), '') || ' '
+               || coalesce(pg_get_expr(x.indpred, x.indrelid), '') as signature
+      from pg_index x
+      join pg_class c on c.oid = x.indrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname not in ('pg_catalog', 'information_schema')
+        and n.nspname !~ '^pg_toast')
+    select indrelid::regclass,
+           string_agg(indexrelid::regclass::text, ', ' order by indexrelid::regclass::text),
+           pg_size_pretty(sum(pg_relation_size(indexrelid)) - max(pg_relation_size(indexrelid)))
+    from i
+    group by indrelid, signature
+    having count(*) > 1
+    order by sum(pg_relation_size(indexrelid)) - max(pg_relation_size(indexrelid)) desc"
+  echo
+  echo "_Keep the one that backs a constraint (primary key / unique), drop the others with"
+  echo "\`DROP INDEX CONCURRENTLY\`._"
+}
+
 report() {
   section_overview
   section_cache_hit
@@ -249,6 +307,8 @@ report() {
   section_db_sizes
   section_bloat
   section_vacuum
+  section_unused_indexes
+  section_duplicate_indexes
 }
 
 if [[ -n $output ]]; then

@@ -78,6 +78,22 @@ jobs:
           sed -n '/^## Table bloat/,$p' report.md
           grep -Eq '^\| public\.bloated \| [0-9]+ MB \| [0-9]+ MB \| (8|9)[0-9]\.[0-9] \|$' report.md
           grep -Eq '^\| public\.dead \| VACUUM \+ ANALYZE \| [0-9]+ \| 5000 \| ' report.md
+      - name: Unused and duplicate indexes are reported
+        run: |
+          sql() { psql -X -v ON_ERROR_STOP=1 -qc "$1"; }
+          sql "create table orders (id int primary key, customer int, note text);
+               insert into orders select g, g % 100, 'n' from generate_series(1, 20000) g;
+               create index orders_customer_idx on orders (customer);
+               create index orders_customer_idx2 on orders (customer);
+               create index orders_note_idx on orders (note);"
+          sql "select count(*) from orders where id = 42"   # uses the primary key only
+          ./pg_health.sh > report.md
+          sed -n '/^## Unused indexes/,$p' report.md
+          grep -Eq '^\| public\.orders_note_idx \| orders \| [0-9]+ kB \| 0 \|$' report.md
+          if sed -n '/^## Unused indexes/,/^## Duplicate/p' report.md | grep -q 'orders_pkey'; then
+            echo "primary key must not be listed as unused"; exit 1
+          fi
+          grep -Eq '^\| orders \| orders_customer_idx, orders_customer_idx2 \| [0-9]+ kB \|$' report.md
       - name: Same report with a monitoring role (pg_monitor, no superuser)
         run: |
           psql -qAtc "create role monitor login password 'monitor' in role pg_monitor"
