@@ -60,6 +60,24 @@ jobs:
           grep -Eq '^\| [0-9]+ \| 97 \| 100 \| [0-9.]+ \|$' report.md   # default 100 - 3 reserved
           grep -q '^## Database sizes' report.md
           grep -Eq '^\| postgres \| [0-9]+ [kMG]?B \|$' report.md
+      - name: Bloated table and table needing VACUUM/ANALYZE are reported
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -q <<'SQL'
+          -- 100k rows, delete 90 % spread over every page, then VACUUM: the pages stay.
+          create table bloated (id int, pad text) with (autovacuum_enabled = off);
+          insert into bloated select g, repeat('x', 100) from generate_series(1, 100000) g;
+          delete from bloated where id % 10 <> 0;
+          vacuum analyze bloated;
+          -- dead rows and changes since ANALYZE that autovacuum is not allowed to clean.
+          create table dead (id int) with (autovacuum_enabled = off);
+          insert into dead select generate_series(1, 10000);
+          analyze dead;
+          delete from dead where id <= 5000;
+          SQL
+          ./pg_health.sh > report.md
+          sed -n '/^## Table bloat/,$p' report.md
+          grep -Eq '^\| public\.bloated \| [0-9]+ MB \| [0-9]+ MB \| (8|9)[0-9]\.[0-9] \|$' report.md
+          grep -Eq '^\| public\.dead \| VACUUM \+ ANALYZE \| 5000 \| 5000 \| 50\.0 \| 5000 \| never \| ' report.md
       - name: Same report with a monitoring role (pg_monitor, no superuser)
         run: |
           psql -qAtc "create role monitor login password 'monitor' in role pg_monitor"

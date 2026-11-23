@@ -66,6 +66,18 @@ Overall: **99.87 %** (since the last statistics reset).
 |---|---|
 | appdb | 38 GB |
 | postgres | 7532 kB |
+
+## Table bloat (estimate, database appdb)
+
+| Table | Size | Estimated bloat | Bloat % |
+|---|---|---|---|
+| public.order_lines | 4210 MB | 1630 MB | 38.7 |
+
+## Tables that need VACUUM / ANALYZE (database appdb)
+
+| Table | Needs | Live rows | Dead rows | Dead % | Changed since analyze | Last vacuum | Last analyze |
+|---|---|---|---|---|---|---|---|
+| public.job_queue | VACUUM + ANALYZE | 120344 | 981220 | 89.1 | 1402311 | 2026-11-02 03:11 | 2026-11-02 03:11 |
 ```
 
 ## Checks
@@ -75,6 +87,12 @@ Overall: **99.87 %** (since the last statistics reset).
 | Cache hit ratio | share of block reads served from `shared_buffers`, overall and per database | below ~99 % on an OLTP database the working set does not fit in memory |
 | Connections | used vs `max_connections` minus superuser-reserved slots, by state | running out of slots means new logins fail; many `idle in transaction` sessions block `VACUUM` |
 | Database sizes | size of every database | growth trend, disk planning |
+| Table bloat | pages on disk vs pages the live rows need (from `pg_stats` and fillfactor), tables ≥ 1 MB with ≥ 20 % bloat | wasted disk and slower sequential scans; fix with `pg_repack` or `VACUUM FULL` |
+| VACUUM / ANALYZE | tables past their autovacuum / autoanalyze trigger point, dead rows, last runs | autovacuum is behind or blocked: bloat grows, plans go bad |
+
+Bloat and VACUUM checks cover the database you connect to; run the script once per database.
+Bloat needs column statistics the role can see — add `pg_read_all_data` (PostgreSQL 14+) to the
+monitoring role to include every table.
 
 ## Exit codes
 
@@ -91,7 +109,7 @@ So it can run from cron, a CI job or a monitoring check (Nagios / Zabbix style).
 
 - [x] skeleton, `--help`, server info header, CI against PostgreSQL 16
 - [x] cache hit ratio, connections vs `max_connections`, database sizes
-- [ ] table bloat estimate, tables that need `VACUUM` / `ANALYZE`
+- [x] table bloat estimate, tables that need `VACUUM` / `ANALYZE`
 - [ ] unused and duplicate indexes, with the space they waste
 - [ ] top queries from `pg_stat_statements` (when installed)
 - [ ] replication lag, inactive slots, transaction ID wraparound age

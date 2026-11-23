@@ -80,14 +80,14 @@ role="primary"
 
 # md_table "Col A|Col B" "$rows" - print psql rows ('|'-separated) as a Markdown table.
 md_table() {
-  local header=$1 rows=$2 sep="|" col line
+  local header=$1 rows=$2 sep="|" line
   local -a cols
   if [[ -z $rows ]]; then
     echo "_None._"
     return
   fi
   IFS='|' read -ra cols <<<"$header"
-  for col in "${cols[@]}"; do sep+="---|"; done
+  for _ in "${cols[@]}"; do sep+="---|"; done
   echo "| ${header//|/ | } |"
   echo "$sep"
   while IFS= read -r line; do
@@ -161,11 +161,90 @@ section_db_sizes() {
     order by pg_database_size(datname) desc")"
 }
 
+# Estimated table bloat: pages on disk vs pages the live rows should need,
+# from reltuples, the average row width in pg_stats and the fillfactor.
+# An estimate only (no pgstattuple needed); tables under 1 MB are skipped.
+section_bloat() {
+  echo
+  echo "## Table bloat (estimate, database ${db})"
+  echo
+  md_table "Table|Size|Estimated bloat|Bloat %" "$(q "
+    select n.nspname || '.' || c.relname,
+           pg_size_pretty(c.relpages::bigint * b.bs),
+           pg_size_pretty(((c.relpages - e.pages) * b.bs)::bigint),
+           round(100 * (c.relpages - e.pages) / c.relpages, 1)
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join lateral (select current_setting('block_size')::numeric as bs) b
+    cross join lateral (
+      select sum((1 - s.null_frac) * s.avg_width) as width
+      from pg_stats s
+      where s.schemaname = n.nspname and s.tablename = c.relname) w
+    cross join lateral (
+      select coalesce((select option_value::int from pg_options_to_table(c.reloptions)
+                       where option_name = 'fillfactor'), 100) as ff) f
+    cross join lateral (
+      -- 24 bytes tuple header, rows aligned to 8 bytes, 4 bytes line pointer per row
+      select ceil(c.reltuples * (ceil((24 + w.width) / 8) * 8 + 4)
+                  / ((b.bs - 24) * f.ff / 100)) as pages) e
+    where c.relkind in ('r', 'm')
+      and n.nspname not in ('pg_catalog', 'information_schema')
+      and n.nspname !~ '^pg_toast'
+      and c.relpages >= 128
+      and c.reltuples > 0
+      and w.width is not null
+      and c.relpages - e.pages >= 0.2 * c.relpages
+    order by c.relpages - e.pages desc
+    limit 15")"
+  echo
+  echo "_Tables of at least 1 MB with 20 % or more estimated bloat. Tables whose columns the"
+  echo "role cannot read are not visible in pg_stats and are skipped (grant pg_read_all_data on"
+  echo "PostgreSQL 14+ to include them). Reclaim space with pg_repack or VACUUM FULL (locks the table)._"
+}
+
+# Tables past their autovacuum / autoanalyze trigger point (global settings):
+# autovacuum is behind, disabled for the table, or blocked by a long transaction.
+section_vacuum() {
+  echo
+  echo "## Tables that need VACUUM / ANALYZE (database ${db})"
+  echo
+  md_table "Table|Needs|Live rows|Dead rows|Dead %|Changed since analyze|Last vacuum|Last analyze" "$(q "
+    with t as (
+      select schemaname || '.' || relname as tbl,
+             n_live_tup, n_dead_tup, n_mod_since_analyze,
+             greatest(last_vacuum, last_autovacuum) as last_vac,
+             greatest(last_analyze, last_autoanalyze) as last_an,
+             n_dead_tup > current_setting('autovacuum_vacuum_threshold')::int
+                          + current_setting('autovacuum_vacuum_scale_factor')::float8 * n_live_tup
+               as need_vac,
+             n_mod_since_analyze > current_setting('autovacuum_analyze_threshold')::int
+                          + current_setting('autovacuum_analyze_scale_factor')::float8 * n_live_tup
+               as need_an
+      from pg_stat_user_tables
+      where n_live_tup + n_dead_tup >= 1000)
+    select tbl,
+           concat_ws(' + ', case when need_vac then 'VACUUM' end, case when need_an then 'ANALYZE' end),
+           n_live_tup, n_dead_tup,
+           round(100.0 * n_dead_tup / nullif(n_live_tup + n_dead_tup, 0), 1),
+           n_mod_since_analyze,
+           coalesce(to_char(last_vac, 'YYYY-MM-DD HH24:MI'), 'never'),
+           coalesce(to_char(last_an, 'YYYY-MM-DD HH24:MI'), 'never')
+    from t
+    where need_vac or need_an
+    order by n_dead_tup desc
+    limit 20")"
+  echo
+  echo "_Run \`VACUUM (ANALYZE, VERBOSE) <table>;\` and check why autovacuum did not:"
+  echo "long transactions, \`autovacuum_enabled = off\`, or too few autovacuum workers._"
+}
+
 report() {
   section_overview
   section_cache_hit
   section_connections
   section_db_sizes
+  section_bloat
+  section_vacuum
 }
 
 if [[ -n $output ]]; then
