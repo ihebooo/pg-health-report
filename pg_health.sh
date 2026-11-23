@@ -78,10 +78,12 @@ IFS='|' read -r version addr port db user uptime in_recovery <<<"$info"
 role="primary"
 [[ $in_recovery == "t" ]] && role="standby (in recovery)"
 
-# md_table "Col A|Col B" "$rows" - print psql rows ('|'-separated) as a Markdown table.
+# md_table "Col A|Col B" "SQL" - run SQL and print its rows as a Markdown table.
+# A failing query stops the report with exit 3 instead of showing an empty table.
 md_table() {
-  local header=$1 rows=$2 sep="|" line
+  local header=$1 rows sep="|" line
   local -a cols
+  rows=$(q "$2") || die "query failed (see the psql error above)"
   if [[ -z $rows ]]; then
     echo "_None._"
     return
@@ -116,16 +118,18 @@ section_cache_hit() {
   echo
   echo "## Cache hit ratio"
   echo
-  echo "Overall: **$(q "select coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 2)::text || ' %', 'n/a')
-                     from pg_stat_database")** (since the last statistics reset)."
+  local overall
+  overall=$(q "select coalesce(round(100.0 * sum(blks_hit) / nullif(sum(blks_hit + blks_read), 0), 2)::text || ' %', 'n/a')
+               from pg_stat_database") || die "query failed (see the psql error above)"
+  echo "Overall: **${overall}** (since the last statistics reset)."
   echo
-  md_table "Database|Hit ratio %|Blocks from cache|Blocks from disk" "$(q "
+  md_table "Database|Hit ratio %|Blocks from cache|Blocks from disk" "
     select datname,
            coalesce(round(100.0 * blks_hit / nullif(blks_hit + blks_read, 0), 2)::text, 'n/a'),
            blks_hit, blks_read
     from pg_stat_database
     where datname is not null
-    order by blks_hit + blks_read desc")"
+    order by blks_hit + blks_read desc"
 }
 
 # Client connections against what is really available to applications
@@ -134,31 +138,31 @@ section_connections() {
   echo
   echo "## Connections"
   echo
-  md_table "Used|Available to applications|max_connections|Used %" "$(q "
+  md_table "Used|Available to applications|max_connections|Used %" "
     with s as (
       select count(*) filter (where backend_type = 'client backend') as used,
              current_setting('max_connections')::int as max_conn,
              current_setting('max_connections')::int
                - current_setting('superuser_reserved_connections')::int as avail
       from pg_stat_activity)
-    select used, avail, max_conn, round(100.0 * used / nullif(avail, 0), 1) from s")"
+    select used, avail, max_conn, round(100.0 * used / nullif(avail, 0), 1) from s"
   echo
-  md_table "State|Connections" "$(q "
+  md_table "State|Connections" "
     select coalesce(state, 'unknown'), count(*)
     from pg_stat_activity
     where backend_type = 'client backend'
-    group by 1 order by 2 desc")"
+    group by 1 order by 2 desc"
 }
 
 section_db_sizes() {
   echo
   echo "## Database sizes"
   echo
-  md_table "Database|Size" "$(q "
+  md_table "Database|Size" "
     select datname, pg_size_pretty(pg_database_size(datname))
     from pg_database
     where datallowconn
-    order by pg_database_size(datname) desc")"
+    order by pg_database_size(datname) desc"
 }
 
 # Estimated table bloat: pages on disk vs pages the live rows should need,
@@ -168,7 +172,7 @@ section_bloat() {
   echo
   echo "## Table bloat (estimate, database ${db})"
   echo
-  md_table "Table|Size|Estimated bloat|Bloat %" "$(q "
+  md_table "Table|Size|Estimated bloat|Bloat %" "
     select n.nspname || '.' || c.relname,
            pg_size_pretty(c.relpages::bigint * b.bs),
            pg_size_pretty(((c.relpages - e.pages) * b.bs)::bigint),
@@ -177,7 +181,7 @@ section_bloat() {
     join pg_namespace n on n.oid = c.relnamespace
     cross join lateral (select current_setting('block_size')::numeric as bs) b
     cross join lateral (
-      select sum((1 - s.null_frac) * s.avg_width) as width
+      select sum(((1 - s.null_frac) * s.avg_width)::numeric) as width
       from pg_stats s
       where s.schemaname = n.nspname and s.tablename = c.relname) w
     cross join lateral (
@@ -185,7 +189,7 @@ section_bloat() {
                        where option_name = 'fillfactor'), 100) as ff) f
     cross join lateral (
       -- 24 bytes tuple header, rows aligned to 8 bytes, 4 bytes line pointer per row
-      select ceil(c.reltuples * (ceil((24 + w.width) / 8) * 8 + 4)
+      select ceil(c.reltuples::numeric * (ceil((24 + w.width) / 8) * 8 + 4)
                   / ((b.bs - 24) * f.ff / 100)) as pages) e
     where c.relkind in ('r', 'm')
       and n.nspname not in ('pg_catalog', 'information_schema')
@@ -195,7 +199,7 @@ section_bloat() {
       and w.width is not null
       and c.relpages - e.pages >= 0.2 * c.relpages
     order by c.relpages - e.pages desc
-    limit 15")"
+    limit 15"
   echo
   echo "_Tables of at least 1 MB with 20 % or more estimated bloat. Tables whose columns the"
   echo "role cannot read are not visible in pg_stats and are skipped (grant pg_read_all_data on"
@@ -208,7 +212,7 @@ section_vacuum() {
   echo
   echo "## Tables that need VACUUM / ANALYZE (database ${db})"
   echo
-  md_table "Table|Needs|Live rows|Dead rows|Dead %|Changed since analyze|Last vacuum|Last analyze" "$(q "
+  md_table "Table|Needs|Live rows|Dead rows|Dead %|Changed since analyze|Last vacuum|Last analyze" "
     with t as (
       select schemaname || '.' || relname as tbl,
              n_live_tup, n_dead_tup, n_mod_since_analyze,
@@ -232,7 +236,7 @@ section_vacuum() {
     from t
     where need_vac or need_an
     order by n_dead_tup desc
-    limit 20")"
+    limit 20"
   echo
   echo "_Run \`VACUUM (ANALYZE, VERBOSE) <table>;\` and check why autovacuum did not:"
   echo "long transactions, \`autovacuum_enabled = off\`, or too few autovacuum workers._"
