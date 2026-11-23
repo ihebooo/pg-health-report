@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck pg_health.sh
+        run: shellcheck pg_health.sh tests/*.sh
 
   top-queries:
     # Service containers cannot take server options, so start PostgreSQL by hand
@@ -92,76 +92,14 @@ jobs:
           grep -Eq '^\| [0-9]+ \| 97 \| 100 \| [0-9.]+ \|$' report.md   # default 100 - 3 reserved
           grep -q '^## Database sizes' report.md
           grep -Eq '^\| postgres \| [0-9]+ [kMG]?B \|$' report.md
-      - name: Bloated table and table needing VACUUM/ANALYZE are reported
+      - name: Seed a demo database with every problem (tests/seed.sh)
+        run: tests/seed.sh pg_health_demo
+      - name: Every seeded problem is reported, Markdown and HTML (tests/check-report.sh)
+        run: tests/check-report.sh pg_health_demo
+      - name: Saved Markdown converts to HTML without a database
         run: |
-          # One psql session per step: statistics counters are flushed when a session ends.
-          sql() { psql -X -v ON_ERROR_STOP=1 -qc "$1"; }
-          sql "create table bloated (id int, pad text) with (autovacuum_enabled = off);
-               create table dead (id int) with (autovacuum_enabled = off);
-               insert into bloated select g, repeat('x', 100) from generate_series(1, 100000) g;
-               insert into dead select generate_series(1, 10000);"
-          # bloated: delete 90 % spread over every page, then VACUUM: the pages stay.
-          sql "delete from bloated where id % 10 <> 0"
-          sql "vacuum analyze bloated"
-          # dead: dead rows and changes since ANALYZE that autovacuum may not clean.
-          sql "analyze dead"
-          sql "delete from dead where id <= 5000"
-          ./pg_health.sh > report.md || [ $? -le 2 ]
-          sed -n '/^## Table bloat/,$p' report.md
-          grep -Eq '^\| public\.bloated \| [0-9]+ MB \| [0-9]+ MB \| (8|9)[0-9]\.[0-9] \|$' report.md
-          grep -Eq '^\| public\.dead \| VACUUM \+ ANALYZE \| [0-9]+ \| 5000 \| ' report.md
-      - name: Unused and duplicate indexes are reported
-        run: |
-          sql() { psql -X -v ON_ERROR_STOP=1 -qc "$1"; }
-          sql "create table orders (id int primary key, customer int, note text);
-               insert into orders select g, g % 100, 'n' from generate_series(1, 20000) g;
-               create index orders_customer_idx on orders (customer);
-               create index orders_customer_idx2 on orders (customer);
-               create index orders_note_idx on orders (note);"
-          sql "select count(*) from orders where id = 42"   # uses the primary key only
-          set +e; ./pg_health.sh > report.md; rc=$?; set -e
-          sed -n '/^## Unused indexes/,$p' report.md
-          echo "exit code: $rc (1 expected: WARN for bloat, vacuum and indexes)"; [ "$rc" -eq 1 ]
-          grep -q '^Overall: \*\*WARN\*\*$' report.md
-          grep -Eq '^\| Table bloat \| WARN \| up to (8|9)[0-9]\.[0-9] % bloat' report.md
-          grep -q '^| VACUUM / ANALYZE | WARN |' report.md
-          grep -q '^| Unused indexes | WARN |' report.md
-          grep -q '^| Duplicate indexes | WARN | 1 set(s) of identical indexes, first on table orders' report.md
-          grep -q '^\*\*Status: WARN\*\* — ' report.md
-          grep -Eq '^\| public\.orders_note_idx \| orders \| [0-9]+ kB \| 0 \|$' report.md
-          if sed -n '/^## Unused indexes/,/^## Duplicate/p' report.md | grep -q 'orders_pkey'; then
-            echo "primary key must not be listed as unused"; exit 1
-          fi
-          grep -Eq '^\| orders \| orders_customer_idx, orders_customer_idx2 \| [0-9]+ kB \|$' report.md
-      - name: Replication, inactive slot and wraparound are reported
-        run: |
-          psql -X -qAtc "select pg_create_physical_replication_slot('old_standby', true)"
-          ./pg_health.sh > report.md || [ $? -le 2 ]
-          sed -n '/^## Top queries/,$p' report.md
-          grep -q 'pg_stat_statements is not installed' report.md
-          grep -q '^| Replication | WARN | 1 inactive replication slot(s)' report.md
-          grep -q '^| XID wraparound | OK |' report.md
-          grep -q '^## Replication$' report.md
-          grep -Eq '^\| old_standby \| physical \| no \| [0-9]+ (bytes|kB|MB) \|$' report.md
-          grep -q '^## Transaction ID wraparound' report.md
-          grep -Eq '^\| postgres \| [0-9]+ \| [0-9.]+ \| 200000000 \|$' report.md
-      - name: HTML report keeps the same statuses and exit code
-        run: |
-          set +e
-          ./pg_health.sh > report.md; rc_md=$?
-          ./pg_health.sh -o report.html; rc_html=$?
-          ./pg_health.sh --format html > report2.html; rc_fmt=$?
-          set -e
-          echo "exit codes: md=$rc_md html=$rc_html format=$rc_fmt"
-          [ "$rc_md" -eq 1 ] && [ "$rc_html" -eq 1 ] && [ "$rc_fmt" -eq 1 ]
-          head -c 15 report.html | grep -qi '<!doctype html>'
-          grep -q '<h2>Summary</h2>' report.html
-          grep -q '<td><span class="st WARN">WARN</span></td>' report.html
-          grep -q '<th>Table</th><th>Size</th><th>Estimated bloat</th><th>Bloat %</th>' report.html
-          grep -q '</html>' report.html
-          # no raw Markdown left in the page
-          if grep -Eq '^\||\*\*|^#' report.html; then echo "unconverted Markdown"; exit 1; fi
-          # a saved Markdown report converts the same way, without a database
+          ./pg_health.sh -d pg_health_demo -o report.md || [ $? -le 2 ]
+          ./pg_health.sh -d pg_health_demo -o report.html || [ $? -le 2 ]
           PGHOST=/nonexistent ./pg_health.sh --to-html report.md > converted.html
           grep -q '<td><span class="st WARN">WARN</span></td>' converted.html
       - name: Keep the reports
