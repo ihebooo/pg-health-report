@@ -66,7 +66,7 @@ q() {
 }
 
 info=$(q "select current_setting('server_version'),
-                 coalesce(inet_server_addr()::text, 'local socket'),
+                 coalesce(host(inet_server_addr()), 'local socket'),
                  current_setting('port'),
                  current_database(),
                  current_user,
@@ -542,10 +542,12 @@ section_summary() {
 
 # Sections run first (their statuses feed the summary), then the overview and
 # the summary are printed above them.
+body=""
+cleanup() { [[ -n $body ]] && rm -f "$body"; return 0; }
+trap cleanup EXIT
+
 report() {
-  local body
   body=$(mktemp)
-  trap 'rm -f "$body"' EXIT
   {
     section_cache_hit
     section_connections
