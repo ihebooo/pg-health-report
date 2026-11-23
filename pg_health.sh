@@ -543,8 +543,7 @@ section_summary() {
 # Sections run first (their statuses feed the summary), then the overview and
 # the summary are printed above them.
 body=""
-cleanup() { [[ -n $body ]] && rm -f "$body"; return 0; }
-trap cleanup EXIT
+trap 'if [[ -n $body ]]; then rm -f "$body"; fi' EXIT
 
 report() {
   body=$(mktemp)
