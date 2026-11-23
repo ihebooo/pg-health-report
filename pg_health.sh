@@ -300,6 +300,104 @@ section_duplicate_indexes() {
   echo "\`DROP INDEX CONCURRENTLY\`._"
 }
 
+# Most expensive statements from pg_stat_statements, when it is installed in
+# this database AND loaded (shared_preload_libraries); otherwise how to enable it.
+section_top_queries() {
+  echo
+  echo "## Top queries by total time (database ${db})"
+  echo
+  local state
+  state=$(q "select case
+                when not exists (select 1 from pg_extension where extname = 'pg_stat_statements')
+                  then 'not-installed'
+                when current_setting('shared_preload_libraries') !~ 'pg_stat_statements'
+                  then 'not-loaded'
+                else 'ok' end") || die "query failed (see the psql error above)"
+  case $state in
+    not-installed)
+      echo "_pg_stat_statements is not installed in this database. Add it to"
+      echo "\`shared_preload_libraries\`, restart, then \`CREATE EXTENSION pg_stat_statements;\`._"
+      return ;;
+    not-loaded)
+      echo "_The extension exists but is not loaded: add pg_stat_statements to"
+      echo "\`shared_preload_libraries\` and restart PostgreSQL._"
+      return ;;
+  esac
+  local total="total_exec_time" mean="mean_exec_time"
+  if (( $(q "select current_setting('server_version_num')::int") < 130000 )); then
+    total="total_time"; mean="mean_time"   # column names before PostgreSQL 13
+  fi
+  md_table "Calls|Total time|Mean ms|% of total|Rows|Query" "
+    select calls,
+           case when ${total} >= 60000 then round((${total} / 60000)::numeric, 1) || ' min'
+                else round((${total} / 1000)::numeric, 1) || ' s' end,
+           round(${mean}::numeric, 2),
+           round((100 * ${total} / nullif(sum(${total}) over (), 0))::numeric, 1),
+           rows,
+           replace(left(regexp_replace(query, '\s+', ' ', 'g'), 90), '|', '¦')
+    from pg_stat_statements
+    where dbid = (select oid from pg_database where datname = current_database())
+    order by ${total} desc
+    limit 10"
+  echo
+  echo "_Start with the top lines: \`EXPLAIN (ANALYZE, BUFFERS)\` the query, look for missing"
+  echo "indexes or row-by-row loops. Reset the counters with \`SELECT pg_stat_statements_reset();\`._"
+}
+
+# Streaming replication seen from this server, plus slots that hold WAL back.
+section_replication() {
+  echo
+  echo "## Replication"
+  echo
+  if [[ $in_recovery == "t" ]]; then
+    md_table "WAL receiver|Primary|Last message|Replay delay" "
+      select status, coalesce(sender_host, '-') || ':' || coalesce(sender_port::text, '-'),
+             date_trunc('second', now() - last_msg_receipt_time),
+             coalesce(date_trunc('second', now() - pg_last_xact_replay_timestamp())::text, 'n/a')
+      from pg_stat_wal_receiver"
+    echo
+    echo "_No WAL receiver row means the standby is not connected to its primary (check its log)._"
+  else
+    md_table "Standby|Address|State|Sync|Replay lag|Lag (time)" "
+      select application_name, coalesce(client_addr::text, 'local'), state, sync_state,
+             pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)),
+             coalesce(date_trunc('second', replay_lag)::text, '-')
+      from pg_stat_replication
+      order by application_name"
+  fi
+  echo
+  echo "### Replication slots"
+  echo
+  local lsn="pg_current_wal_lsn()"
+  [[ $in_recovery == "t" ]] && lsn="pg_last_wal_replay_lsn()"
+  md_table "Slot|Type|Active|WAL retained" "
+    select slot_name, slot_type, case when active then 'yes' else 'no' end,
+           coalesce(pg_size_pretty(pg_wal_lsn_diff(${lsn}, restart_lsn)), 'n/a')
+    from pg_replication_slots
+    order by active, pg_wal_lsn_diff(${lsn}, restart_lsn) desc nulls last"
+  echo
+  echo "_An inactive slot keeps every WAL file since its restart point until the disk fills up._"
+  echo "_Drop it when its consumer is gone: \`SELECT pg_drop_replication_slot('<slot>');\`._"
+}
+
+# Transaction ID age per database. At 2^31 PostgreSQL stops accepting writes to
+# prevent wraparound; autovacuum freezes rows long before that if it can.
+section_wraparound() {
+  echo
+  echo "## Transaction ID wraparound"
+  echo
+  md_table "Database|XID age|% of wraparound|autovacuum_freeze_max_age" "
+    select datname, age(datfrozenxid),
+           round(100.0 * age(datfrozenxid) / 2147483648, 1),
+           current_setting('autovacuum_freeze_max_age')
+    from pg_database
+    order by age(datfrozenxid) desc"
+  echo
+  echo "_Above autovacuum_freeze_max_age autovacuum runs an aggressive freeze. If the age keeps"
+  echo "growing, look for long transactions, abandoned prepared transactions or inactive slots,"
+  echo "then \`VACUUM (FREEZE, VERBOSE)\` the oldest tables._"
+}
+
 report() {
   section_overview
   section_cache_hit
@@ -309,6 +407,9 @@ report() {
   section_vacuum
   section_unused_indexes
   section_duplicate_indexes
+  section_top_queries
+  section_replication
+  section_wraparound
 }
 
 if [[ -n $output ]]; then
